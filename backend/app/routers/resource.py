@@ -221,3 +221,169 @@ def pipeline_cost_aggregate_alert() -> dict[str, Any]:
             "cost_aggregation": cost_svc.aggregate_module_costs(),
             "quota_check": cost_svc.check_monthly_quota(),
             "cache_report": result_cache_svc.cache_hit_rate_report()}
+
+
+# -- 实验共享分组指标：曝光锁定、按角色读取、共享报告与发布清单 --
+
+from app.services.exp_group_metric import ExpGroupMetricService
+from app.services.metric_factory import MetricFactoryService
+from app.services import experiment_common as exp_common
+
+exp_metric_svc = ExpGroupMetricService()
+metric_factory_svc = MetricFactoryService()
+
+
+@router.post("/experiments/{experiment_id}/exposures")
+def record_experiment_exposure(
+    experiment_id: str,
+    user_id: str = Query(...),
+    exposure_code: str | None = Query(default=None),
+    version: str | None = Query(default=None),
+    sample_size: int = Query(default=1, ge=0),
+    converted: int = Query(default=0, ge=0),
+    metric: str = Query(default="转化"),
+) -> dict[str, Any]:
+    """写入曝光：分桶版本随即锁定，同一条曝光只归一个实际组。"""
+    return exp_metric_svc.record_exposure(
+        experiment_id, user_id, exposure_code=exposure_code, version=version,
+        sample_size=sample_size, converted=converted, metric=metric,
+    )
+
+
+@router.get("/experiments/{experiment_id}/group-metrics")
+def shared_experiment_group_metrics(
+    experiment_id: str,
+    role: str = Query(default="analyst"),
+    metric: str = Query(default="转化"),
+    version: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """数据分析人员读取自己可访问的分组指标；不可见组不返回数值。"""
+    if not exp_common.experiment_exists(experiment_id):
+        raise HTTPException(status_code=404, detail=f"实验 {experiment_id} 不存在")
+    result = exp_metric_svc.shared_group_metrics(experiment_id, role, metric, version)
+    if not result.get("ok") and "没有任何可读分组" in str(result.get("message", "")):
+        raise HTTPException(status_code=403, detail=result["message"])
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("message", "分组指标不可用"))
+    return result
+
+
+@router.post("/experiments/{experiment_id}/group-metrics/compute")
+def compute_experiment_group_metrics(
+    experiment_id: str,
+    role: str = Query(default="metric_engine"),
+    metric: str = Query(default="转化"),
+    version: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """内部聚合：关联分桶配置与指标明细，按版本保存每组明确的曝光范围。"""
+    if not exp_common.experiment_exists(experiment_id):
+        raise HTTPException(status_code=404, detail=f"实验 {experiment_id} 不存在")
+    result = exp_metric_svc.compute_group_metrics(
+        experiment_id, metric, version, actor_role=role,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=403 if "无权" in str(result.get("message")) else 400,
+                            detail=result.get("message"))
+    return result
+
+
+@router.post("/experiments/{experiment_id}/group-share")
+def adjust_experiment_group_share(
+    experiment_id: str,
+    group: str = Query(...),
+    share: str = Query(...),
+    version: str | None = Query(default=None),
+    actor: str = Query(default="experiment_owner"),
+) -> dict[str, Any]:
+    """调整分组共享归属；返回受影响的报告和读者交付记录供核对。"""
+    result = exp_metric_svc.set_group_share(
+        experiment_id, group, share, actor=actor, version=version,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("message"))
+    return result
+
+
+@router.post("/experiments/{experiment_id}/reports")
+def prepare_experiment_shared_report(
+    experiment_id: str,
+    role: str = Query(default="analyst"),
+    metric: str = Query(default="转化"),
+    version: str | None = Query(default=None),
+    created_by: str = Query(default="experiment_owner"),
+) -> dict[str, Any]:
+    """生成共享只读报告草稿：只覆盖角色授权范围，并标明被抑制的合计与对比。"""
+    if not exp_common.experiment_exists(experiment_id):
+        raise HTTPException(status_code=404, detail=f"实验 {experiment_id} 不存在")
+    result = exp_metric_svc.prepare_shared_report(
+        experiment_id, role, metric=metric, version=version, created_by=created_by,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=403 if "没有任何可读分组" in str(result.get("message", ""))
+                            else 400, detail=result.get("message"))
+    return result
+
+
+@router.get("/experiments/{experiment_id}/reports")
+def list_experiment_reports(
+    experiment_id: str,
+    role: str | None = Query(default=None),
+) -> dict[str, Any]:
+    reports = exp_metric_svc.list_reports(experiment_id, role)
+    return {"items": reports, "total": len(reports)}
+
+
+@router.post("/experiments/{experiment_id}/reports/{report_id}/publish")
+def publish_experiment_shared_report(
+    experiment_id: str,
+    report_id: str,
+    actor: str = Query(default="experiment_owner"),
+    publish_mode: str = Query(default="paired"),
+    allow_partial: bool = Query(default=False),
+) -> dict[str, Any]:
+    """发布共享只读报告：发布前按实际授权范围复算，成对分析冲突时挂起待复核。"""
+    result = exp_metric_svc.publish_report(
+        experiment_id, report_id, actor=actor,
+        publish_mode=publish_mode, allow_partial=allow_partial,
+    )
+    if result.get("conflict"):
+        # 冲突不是服务故障：以 409 返回待复核状态和新报告快照。
+        raise HTTPException(status_code=409, detail=result)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("message"))
+    return result
+
+
+@router.get("/experiments/{experiment_id}/deliveries")
+def list_experiment_deliveries(
+    experiment_id: str,
+    role: str | None = Query(default=None),
+) -> dict[str, Any]:
+    deliveries = exp_metric_svc.list_deliveries(experiment_id=experiment_id, role=role)
+    return {"items": deliveries, "total": len(deliveries)}
+
+
+@router.get("/experiments/{experiment_id}/release")
+def get_experiment_release(experiment_id: str) -> dict[str, Any]:
+    releases = exp_metric_svc.list_releases(experiment_id)
+    if not releases:
+        raise HTTPException(status_code=404, detail=f"实验 {experiment_id} 还没有发布清单")
+    return releases[0]
+
+
+@router.post("/pipelines/experiment-shared-report")
+def pipeline_experiment_shared_report(
+    experiment_id: str = Query(...),
+    metric: str = Query(default="转化"),
+    role: str = Query(default="analyst"),
+    version: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """指标工厂消费可共享实验分组指标，产出带分桶版本的报告并回写发布清单。"""
+    if not exp_common.experiment_exists(experiment_id):
+        raise HTTPException(status_code=404, detail=f"实验 {experiment_id} 不存在")
+    result = metric_factory_svc.produce_experiment_report(
+        experiment_id, metric, role=role, version=version,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("message"))
+    return {"ok": True, "pipeline": "experiment_shared_report", **result}

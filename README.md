@@ -72,6 +72,46 @@ npm run dev
 | 结果缓存 | `result_cache` | 缓存条目 | 条目编号、查询摘要、结果哈希 |
 | 数据契约 | `data_contract` | 契约定义 | 契约编号、数据集、Schema约束 |
 | 实验配置 | `ab_config` | AB实验 | 实验编号、实验名称、分流比例 |
+| 实验分组指标 | `exp_group_metric` | 实验分组指标 | 分组指标编号、实验编号、分桶版本、分组名称 |
+
+## 实验共享分组指标
+
+实验配置原先只有分桶与投放记录，无法按实验归属共享结果。新增的
+`exp_group_metric` 模块把分桶配置、曝光记录和指标明细关联起来：
+
+- `exp_bucket_config`：按实验 + 分桶版本登记分组、归属桶范围和共享范围。
+- `exp_exposure`：写入曝光时锁定当时的 `分桶版本`，同一曝光编号/同一用户
+  在同一版本内只归一个实际组，不能重放改组。
+- `exp_metric_detail`：指标明细必须挂在已存在的曝光上。
+- `exp_group_metric`：聚合结果保存该组明确的曝光编号范围（`曝光范围`），
+  下游只能按这个范围复算，不能隐式扩大到全量。
+- `exp_group_share` / `exp_role_access`：分组共享范围和角色可读范围（公开/受限/已退出）。
+
+主要接口：
+
+```text
+POST /api/experiments/{实验编号}/exposures                  写入并锁定曝光
+POST /api/experiments/{实验编号}/group-metrics/compute      内部聚合全部分组
+GET  /api/experiments/{实验编号}/group-metrics?role=analyst  按角色读取共享分组
+POST /api/experiments/{实验编号}/group-share                调整分组共享归属
+POST /api/experiments/{实验编号}/reports                    生成共享只读报告草稿
+POST /api/experiments/{实验编号}/reports/{报告}/publish      发布（冲突返回 409）
+GET  /api/experiments/{实验编号}/deliveries                 读者交付记录
+GET  /api/experiments/{实验编号}/release                    实验发布清单
+POST /api/pipelines/experiment-shared-report                 指标工厂产出报告并回写发布清单
+```
+
+口径约定：
+
+- 存在未授权或已退出分组时，报告与读取接口返回 `total: null`，不提供全量合计；
+  受限组只出现在 `hidden` / `受限分组` 名称里，样本量与转化量都不返回。
+- 对照组或实验组退出共享范围时，`paired` 发布返回 409 并转入「待复核」；
+  显式 `allow_partial=true` 才按实际可见组重新复算并发布。
+- 已交付报告是历史快照，不会被原地改写；分组退出或收紧时交付记录标记为
+  「待回收」，新报告按新范围单独生成。
+- 指标工厂消费分组指标登记的曝光范围，复算不一致时拒绝产出，并把实际开放的
+  指标结果写入 `exp_release` 发布清单（含分桶版本）。
+
 
 ## 约定
 

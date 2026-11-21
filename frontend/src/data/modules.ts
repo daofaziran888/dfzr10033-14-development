@@ -244,6 +244,17 @@ export const MODULES: ModuleMeta[] = [
     actionTargets: {"启动实验": "运行中", "结束实验": "已结束", "终止实验": "已终止"},
     metrics: ["实验总数", "运行中实验", "已结束实验"],
   },
+  {
+    key: "exp_group_metric",
+    name: "实验分组指标",
+    entity: "实验分组指标",
+    desc: "关联实验分桶配置、曝光记录和指标明细，按实验归属聚合可共享的分组指标；受限组不出数。",
+    fields: ["分组指标编号", "实验编号", "分桶版本", "分组名称", "指标名称", "样本量", "转化量", "转化率", "曝光范围", "共享范围"],
+    statuses: ["待聚合", "已聚合", "已失效", "已归档"],
+    actions: ["确认聚合", "标记失效", "归档指标"],
+    actionTargets: {"确认聚合": "已聚合", "标记失效": "已失效", "归档指标": "已归档"},
+    metrics: ["分组指标总数", "已聚合指标", "已归档指标"],
+  },
 ]
 
 export const MODULE_BY_KEY: Map<string, ModuleMeta> = new Map(
